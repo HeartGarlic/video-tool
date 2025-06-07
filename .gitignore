@@ -1,5 +1,11 @@
 .idea
+build
 ffmpeg.exe
 .music
 video.exe
 .dist
+videos
+output
+music
+video_tool.spec
+video_tool.exe
