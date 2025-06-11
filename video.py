@@ -2,13 +2,18 @@ import os
 import random
 import sys
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QFileDialog,
     QLabel, QVBoxLayout, QProgressBar, QMessageBox, QCheckBox, QComboBox, QHBoxLayout, QLineEdit
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QMutex, pyqtSignal, QObject
 import ctypes
 
+class WorkerSignals(QObject):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal()
 
 class VideoBatchTool(QWidget):
     def __init__(self):
@@ -26,6 +31,7 @@ class VideoBatchTool(QWidget):
         self.audio_volume = 1.0
         self.use_gpu = True
         self.ffmpeg_path = "./ffmpeg.exe" if os.name == 'nt' else "./ffmpeg"
+        self.signals = WorkerSignals()
 
         print("初始化配置:")
         print(f"视频目录: {self.video_folder}, 输出目录: {self.output_folder}")
@@ -86,8 +92,7 @@ class VideoBatchTool(QWidget):
 
         self.original_audio_checkbox = QCheckBox("保留原视频声音")
         self.original_audio_checkbox.setChecked(True)
-        self.original_audio_checkbox.stateChanged.connect(
-            lambda state: setattr(self, 'keep_original_audio', state == Qt.Checked))
+        self.original_audio_checkbox.stateChanged.connect(lambda state: setattr(self, 'keep_original_audio', state == Qt.Checked))
 
         self.gpu_checkbox = QCheckBox("启用GPU加速")
         self.gpu_checkbox.setChecked(True)
@@ -107,7 +112,7 @@ class VideoBatchTool(QWidget):
         self.status_label = QLabel("状态：等待开始处理")
 
         btn_process = QPushButton("开始处理")
-        btn_process.clicked.connect(self.process_all)
+        btn_process.clicked.connect(self.start_processing_thread)
 
         layout.addWidget(self.folder_label)
         layout.addWidget(btn_folder)
@@ -131,6 +136,12 @@ class VideoBatchTool(QWidget):
         layout.addWidget(btn_process)
 
         self.setLayout(layout)
+
+        self.signals.progress.connect(self.progress.setValue)
+        self.signals.finished.connect(lambda: (self.status_label.setText("处理完成！"), QMessageBox.information(self, "完成", "所有视频已处理完毕。")))
+
+    def start_processing_thread(self):
+        threading.Thread(target=self.process_all, daemon=True).start()
 
     def set_volume(self, value):
         try:
@@ -174,8 +185,7 @@ class VideoBatchTool(QWidget):
     def get_random_music(self):
         if not self.music_folder:
             return None
-        candidates = [os.path.join(self.music_folder, f) for f in os.listdir(self.music_folder) if
-                      f.endswith(('.mp3', '.wav', '.aac', '.flac'))]
+        candidates = [os.path.join(self.music_folder, f) for f in os.listdir(self.music_folder) if f.endswith(('.mp3', '.wav', '.aac', '.flac'))]
         return random.choice(candidates) if candidates else None
 
     def process_all(self):
@@ -191,17 +201,18 @@ class VideoBatchTool(QWidget):
         self.progress.setMaximum(len(videos))
         self.progress.setValue(0)
 
-        for idx, video in enumerate(videos):
-            self.status_label.setText(f"处理: {video}")
-            QApplication.processEvents()
+        def process_and_update(index, video):
             try:
                 self.process_single_video(video)
             except Exception as e:
                 print(f"处理失败: {video} 错误: {e}")
-            self.progress.setValue(idx + 1)
+            self.signals.progress.emit(index + 1)
 
-        self.status_label.setText("处理完成！")
-        QMessageBox.information(self, "完成", "所有视频已处理完毕。")
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            for idx, video in enumerate(videos):
+                executor.submit(process_and_update, idx, video)
+
+        self.signals.finished.emit()
 
     def process_single_video(self, filename):
         input_path = os.path.join(self.video_folder, filename)
@@ -245,19 +256,17 @@ class VideoBatchTool(QWidget):
         cmd += ["-shortest", output_path]
 
         si = None
-        creationFlags = 0
+        creationflags = 0
         if os.name == 'nt':
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            creationFlags = subprocess.CREATE_NO_WINDOW
+            creationflags = subprocess.CREATE_NO_WINDOW
 
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si,
-                                   creationflags=creationFlags)
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=si, creationflags=creationflags)
         stdout, stderr = process.communicate()
 
         if process.returncode != 0:
             print("FFmpeg 错误输出:\n", stderr.decode())
-
 
 if __name__ == "__main__":
     print("启动应用...")
